@@ -1,6 +1,7 @@
 const dotenv = require('dotenv');
 const fs = require('fs');
 const http = require('http');
+const jwt = require('jsonwebtoken');
 const { Octokit, App } = require('octokit');
 const { createNodeMiddleware } = require('@octokit/webhooks');
 const SCAOrchestrator = require('./orchestrator');
@@ -60,6 +61,21 @@ const app = new App({
       };
       return eventMap[githubEvent] || githubEvent;
     }
+
+    /**
+     * Create a JWT token for GitHub App authentication
+     */
+    function createJWT() {
+      const now = Math.floor(Date.now() / 1000);
+      const payload = {
+        iat: now - 60,  // Issued 60 seconds ago (allow for clock drift)
+        exp: now + (10 * 60),  // Expires in 10 minutes
+        iss: appId  // GitHub App's ID
+      };
+      return jwt.sign(payload, privateKey, { algorithm: 'RS256' });
+    }
+
+
 
     /**
      * Process GitHub webhook through SCA orchestrator
