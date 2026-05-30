@@ -152,12 +152,23 @@ const app = new App({
 
     // Graceful shutdown
     process.on('SIGINT', async () => {
-      console.log('\n\n📊 Generating final report before shutdown...');
+      console.log('\n\n📊 Preparing graceful shutdown...');
       try {
+        // Sync graph to database before shutting down
+        console.log('💾 Syncing knowledge graph to MongoDB...');
+        await orchestrator.syncGraphToDatabase();
+
+        // Generate final report
+        console.log('📊 Generating final report...');
         await orchestrator.generateReport();
-        console.log('✓ Final report generated');
+
+        // Close database connection
+        console.log('🔌 Closing database connection...');
+        await orchestrator.closeDatabase();
+
+        console.log('✓ Graceful shutdown complete');
       } catch (error) {
-        console.error('Error generating final report:', error);
+        console.error('Error during shutdown:', error);
       }
       process.exit(0);
     });

@@ -8,6 +8,7 @@ const scaHooks = require('./hooks/sca');
 const orchestratorHooks = require('./hooks/orchestrator');
 const domain = require('./domain');
 const KnowledgeGraphGenerator = require('./output/knowledge-graph');
+const MongoDBManager = require('./config/db-manager');
 const DiffCalculator = domain.DiffCalculator;
 const IndexingManager = domain.IndexingManager;
 
@@ -17,6 +18,14 @@ class SCAOrchestrator extends EventEmitter {
         this.config = config;
         this.analyzers = domain.createAnalyzers();
         this.graphGenerator = new KnowledgeGraphGenerator(config.outputDir || './output');
+
+        // Initialize MongoDB Manager with config
+        const dbConfig = {
+            url: config.mongoUrl || process.env.MONGODB_URL,
+            options: config.mongoOptions || {}
+        };
+        this.databaseManager = new MongoDBManager(dbConfig);
+
         this.currentGraph = this.analyzers.graph.export();
         this.diffs = [];
         this.initialized = false;
@@ -28,6 +37,9 @@ class SCAOrchestrator extends EventEmitter {
     async initialize() {
         try {
             console.log('Initializing SCA Orchestrator...');
+
+            // Initialize database
+            await this.databaseManager.initialize();
 
             // Initialize output directory
             await this.graphGenerator.initializeOutputDir();
@@ -150,6 +162,9 @@ class SCAOrchestrator extends EventEmitter {
             ...eventResult.data,
         };
         this.analyzers.graph.addNode(prNode);
+
+        // Persist to database immediately
+        await this.persistNode(prNode);
     }
 
     /**
@@ -164,7 +179,7 @@ class SCAOrchestrator extends EventEmitter {
         console.log(`Processing push to ${eventResult.data.branch}`);
 
         // Add commits as nodes
-        eventResult.data.commits.forEach(commit => {
+        eventResult.data.commits.forEach(async (commit) => {
             this.analyzers.git.addCommit(commit);
             const commitNode = {
                 type: 'commit',
@@ -172,6 +187,9 @@ class SCAOrchestrator extends EventEmitter {
                 ...commit,
             };
             this.analyzers.graph.addNode(commitNode);
+
+            // Persist to database immediately
+            await this.persistNode(commitNode);
         });
 
         // Trigger incremental reindex
@@ -194,6 +212,9 @@ class SCAOrchestrator extends EventEmitter {
         };
         this.analyzers.graph.addNode(incidentNode);
 
+        // Persist to database immediately
+        await this.persistNode(incidentNode);
+
         // Create ticket
         const ticket = this.analyzers.security.createIncidentTicket(alert);
         console.log(`Created incident ticket: ${ticket.title}`);
@@ -213,6 +234,9 @@ class SCAOrchestrator extends EventEmitter {
             ...alert,
         };
         this.analyzers.graph.addNode(issueNode);
+
+        // Persist to database immediately
+        await this.persistNode(issueNode);
     }
 
     /**
@@ -227,6 +251,9 @@ class SCAOrchestrator extends EventEmitter {
             ...eventResult.data,
         };
         this.analyzers.graph.addNode(releaseNode);
+
+        // Persist to database immediately
+        await this.persistNode(releaseNode);
     }
 
     /**
@@ -241,6 +268,9 @@ class SCAOrchestrator extends EventEmitter {
             ...eventResult.data,
         };
         this.analyzers.graph.addNode(workflowNode);
+
+        // Persist to database immediately
+        await this.persistNode(workflowNode);
     }
 
     /**
@@ -257,6 +287,9 @@ class SCAOrchestrator extends EventEmitter {
             ...eventResult.data,
         };
         this.analyzers.graph.addNode(issueNode);
+
+        // Persist to database immediately
+        await this.persistNode(issueNode);
     }
 
     /**
@@ -288,6 +321,9 @@ class SCAOrchestrator extends EventEmitter {
             ...eventResult.data,
         };
         this.analyzers.graph.addNode(deploymentNode);
+
+        // Persist to database immediately
+        await this.persistNode(deploymentNode);
     }
 
     /**
@@ -372,6 +408,109 @@ class SCAOrchestrator extends EventEmitter {
             indexing: this.analyzers.indexing?.getStats() || null,
             diffs_recorded: this.diffs.length,
         };
+    }
+
+    /**
+     * Persist a node to the database
+     */
+    async persistNode(node) {
+        try {
+            if (!this.initialized || !this.databaseManager.initialized) {
+                console.warn('Database not initialized, skipping node persistence');
+                return;
+            }
+            await this.databaseManager.upsertNode(node);
+        } catch (error) {
+            console.error('Failed to persist node:', error);
+            // Don't throw - continue processing even if DB fails
+        }
+    }
+
+    /**
+     * Persist an edge to the database
+     */
+    async persistEdge(edge) {
+        try {
+            if (!this.initialized || !this.databaseManager.initialized) {
+                console.warn('Database not initialized, skipping edge persistence');
+                return;
+            }
+            await this.databaseManager.upsertEdge(edge);
+        } catch (error) {
+            console.error('Failed to persist edge:', error);
+            // Don't throw - continue processing even if DB fails
+        }
+    }
+
+    /**
+     * Sync entire current graph to database
+     */
+    async syncGraphToDatabase() {
+        try {
+            if (!this.initialized || !this.databaseManager.initialized) {
+                throw new Error('Orchestrator or Database not initialized');
+            }
+
+            console.log('Syncing graph to database...');
+
+            // Persist all nodes
+            const nodes = this.currentGraph.nodes || [];
+            for (const node of nodes) {
+                await this.persistNode(node);
+            }
+
+            // Persist all edges
+            const edges = this.currentGraph.edges || [];
+            for (const edge of edges) {
+                await this.persistEdge(edge);
+            }
+
+            // Record statistics snapshot
+            const stats = await this.databaseManager.getGraphStatistics();
+            await this.databaseManager.recordStatistics(stats);
+
+            console.log(`✓ Synced ${nodes.length} nodes and ${edges.length} edges to database`);
+        } catch (error) {
+            console.error('Failed to sync graph to database:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Load graph from database
+     */
+    async loadGraphFromDatabase() {
+        try {
+            if (!this.initialized || !this.databaseManager.initialized) {
+                throw new Error('Orchestrator or Database not initialized');
+            }
+
+            console.log('Loading graph from database...');
+            const graph = await this.databaseManager.exportGraph();
+
+            this.currentGraph = graph;
+            console.log(`✓ Loaded ${graph.nodes.length} nodes and ${graph.edges.length} edges from database`);
+
+            return graph;
+        } catch (error) {
+            console.error('Failed to load graph from database:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Close database connection gracefully
+     */
+    async closeDatabase() {
+        try {
+            if (this.databaseManager && this.databaseManager.initialized) {
+                await this.databaseManager.close();
+                console.log('✓ Database connection closed');
+            }
+        } catch (error) {
+            console.error('Error closing database:', error);
+            throw error;
+        }
     }
 }
 
