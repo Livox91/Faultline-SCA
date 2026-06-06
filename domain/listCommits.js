@@ -49,48 +49,52 @@ async function listAndIngestCommits(authOctokit, owner, repo) {
 
         // 4. The Cypher query handling the Nodes and Relationships
         const cypherQuery = `
-            UNWIND $jsonArray AS data
+UNWIND $jsonArray AS data
 
-            MERGE (c:Commit {sha: data.sha})
-            SET c.message = data.commit.message,
-                c.date = datetime(data.commit.author.date),
-                c.url = data.html_url,
-                c.total_changes = data.stats.total
+MERGE (c:Commit {sha: data.sha})
+SET c.message = data.commit.message,
+    c.date = datetime(data.commit.author.date),
+    c.url = data.html_url,
+    c.total_changes = coalesce(data.stats.total, 0)
 
-            FOREACH (parent IN data.parents |
-                MERGE (p:Commit {sha: parent.sha})
-                MERGE (c)-[:HAS_PARENT]->(p)
-            )
+FOREACH (parent IN coalesce(data.parents, []) |
+    MERGE (p:Commit {sha: parent.sha})
+    MERGE (c)-[:HAS_PARENT]->(p)
+)
 
-            MERGE (author:User {login: data.author.login})
-            SET author.id = data.author.id, 
-            
-            MERGE (author)-[:AUTHORED]->(c)
+FOREACH (_ IN CASE WHEN data.author IS NOT NULL THEN [1] ELSE [] END |
+    MERGE (author:User {login: data.author.login})
+    SET author.id = data.author.id
+    MERGE (author)-[:AUTHORED]->(c)
+)
 
-            MERGE (committer:User {login: data.committer.login})
-            SET committer.id = data.committer.id, 
-            
-            MERGE (committer)-[:COMMITTED]->(c)
+FOREACH (_ IN CASE WHEN data.committer IS NOT NULL THEN [1] ELSE [] END |
+    MERGE (committer:User {login: data.committer.login})
+    SET committer.id = data.committer.id
+    MERGE (committer)-[:COMMITTED]->(c)
+)
 
-            FOREACH (file IN data.files |
-                MERGE (f:File {filename: file.filename})
-                
-                FOREACH (_ IN CASE WHEN file.status = 'modified' THEN [1] ELSE [] END |
-                    MERGE (c)-[r:MODIFIED]->(f)
-                    SET r.additions = file.additions, r.deletions = file.deletions, r.changes = file.changes
-                )
-                
-                FOREACH (_ IN CASE WHEN file.status = 'added' THEN [1] ELSE [] END |
-                    MERGE (c)-[r:ADDED]->(f)
-                    SET r.additions = file.additions
-                )
-                
-                FOREACH (_ IN CASE WHEN file.status = 'removed' THEN [1] ELSE [] END |
-                    MERGE (c)-[r:DELETED]->(f)
-                    SET r.deletions = file.deletions
-                )
-            )
-        `;
+FOREACH (file IN coalesce(data.files, []) |
+    MERGE (f:File {filename: file.filename})
+
+    FOREACH (_ IN CASE WHEN file.status = 'modified' THEN [1] ELSE [] END |
+        MERGE (c)-[r:MODIFIED]->(f)
+        SET r.additions = file.additions,
+            r.deletions = file.deletions,
+            r.changes = file.changes
+    )
+
+    FOREACH (_ IN CASE WHEN file.status = 'added' THEN [1] ELSE [] END |
+        MERGE (c)-[r:ADDED]->(f)
+        SET r.additions = file.additions
+    )
+
+    FOREACH (_ IN CASE WHEN file.status = 'removed' THEN [1] ELSE [] END |
+        MERGE (c)-[r:DELETED]->(f)
+        SET r.deletions = file.deletions
+    )
+)
+`;
 
         // 5. Execute the query with our data array passed as a parameter
         await session.run(cypherQuery, { jsonArray: fullCommitData });
